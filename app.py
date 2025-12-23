@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import shap
 
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.ensemble import RandomForestClassifier, IsolationForest
@@ -12,9 +12,10 @@ from sklearn.metrics import accuracy_score, roc_auc_score, roc_curve
 from imblearn.over_sampling import SMOTE
 
 # ======================================
-# PAGE CONFIG
+# APP BOOT MESSAGE (PREVENTS BLACK SCREEN)
 # ======================================
 st.set_page_config(page_title="Fraud Detection System", layout="wide")
+st.write("🚀 App booting successfully...")
 
 # ======================================
 # SESSION STATE
@@ -23,13 +24,10 @@ if "history" not in st.session_state:
     st.session_state.history = []
 
 # ======================================
-# SIDEBAR NAVIGATION
+# SIDEBAR
 # ======================================
 st.sidebar.title("📌 Menu")
-page = st.sidebar.radio(
-    "Navigate",
-    ["📊 Dashboard", "🔍 Predict Fraud"]
-)
+page = st.sidebar.radio("Navigate", ["📊 Dashboard", "🔍 Predict Fraud"])
 
 # ======================================
 # LOAD DATA
@@ -41,22 +39,23 @@ def load_data():
 df_default = load_data()
 
 # ======================================
-# PREPROCESS FUNCTION
+# PREPROCESS
 # ======================================
-def preprocess(data):
-    data = data.copy()
-    data["TX_DATETIME"] = pd.to_datetime(data["TX_DATETIME"])
-    data["TX_HOUR"] = data["TX_DATETIME"].dt.hour
-    data["TX_DAY"] = data["TX_DATETIME"].dt.day_name()
+def preprocess(df):
+    df = df.copy()
+    df["TX_DATETIME"] = pd.to_datetime(df["TX_DATETIME"])
+    df["TX_HOUR"] = df["TX_DATETIME"].dt.hour
+    df["TX_DAY"] = df["TX_DATETIME"].dt.day_name()
 
     le = LabelEncoder()
-    data["CUSTOMER_ID"] = le.fit_transform(data["CUSTOMER_ID"])
-    data["TERMINAL_ID"] = le.fit_transform(data["TERMINAL_ID"])
-    return data
+    df["CUSTOMER_ID"] = le.fit_transform(df["CUSTOMER_ID"])
+    df["TERMINAL_ID"] = le.fit_transform(df["TERMINAL_ID"])
+    return df
 
 # ======================================
-# TRAIN MODELS
+# TRAIN MODELS (CACHED – VERY IMPORTANT)
 # ======================================
+@st.cache_resource
 def train_models(df):
     df_p = preprocess(df)
 
@@ -70,8 +69,12 @@ def train_models(df):
         X_res, y_res, test_size=0.3, random_state=42
     )
 
-    # Random Forest
-    rf = RandomForestClassifier(random_state=42)
+    # Lightweight RF (Cloud-safe)
+    rf = RandomForestClassifier(
+        n_estimators=50,
+        max_depth=10,
+        random_state=42
+    )
     rf.fit(X_train, y_train)
 
     # Logistic Regression
@@ -82,11 +85,11 @@ def train_models(df):
     lr = LogisticRegression(max_iter=1000)
     lr.fit(X_train_scaled, y_train)
 
-    return (
-        rf, lr, scaler,
-        X_test, X_test_scaled, y_test,
-        X_res, X.columns, df_p
-    )
+    # Isolation Forest
+    iso = IsolationForest(contamination=0.05, random_state=42)
+    iso.fit(X)
+
+    return rf, lr, scaler, iso, X_test, X_test_scaled, y_test, df_p, X.columns
 
 # ======================================
 # DASHBOARD PAGE
@@ -95,29 +98,22 @@ if page == "📊 Dashboard":
 
     st.title("💳 Fraud Detection Dashboard")
 
-    (
-        rf, lr, scaler,
-        X_test, X_test_scaled, y_test,
-        X_res, feature_names, df_p
-    ) = train_models(df_default)
+    rf, lr, scaler, iso, X_test, X_test_scaled, y_test, df_p, features = train_models(df_default)
 
-    # ---------------- MODEL COMPARISON ----------------
     rf_prob = rf.predict_proba(X_test)[:, 1]
     lr_prob = lr.predict_proba(X_test_scaled)[:, 1]
 
     rf_auc = roc_auc_score(y_test, rf_prob)
     lr_auc = roc_auc_score(y_test, lr_prob)
 
+    # KPIs
     c1, c2, c3 = st.columns(3)
     c1.metric("RF ROC-AUC", f"{rf_auc:.2f}")
     c2.metric("LR ROC-AUC", f"{lr_auc:.2f}")
     c3.metric("Best Model", "Random Forest" if rf_auc > lr_auc else "Logistic Regression")
 
-    st.markdown("---")
-
-    # ---------------- ROC CURVE ----------------
-    st.subheader("📈 ROC Curve Comparison")
-
+    # ROC Curve
+    st.subheader("📈 Model Comparison (ROC Curve)")
     rf_fpr, rf_tpr, _ = roc_curve(y_test, rf_prob)
     lr_fpr, lr_tpr, _ = roc_curve(y_test, lr_prob)
 
@@ -128,80 +124,44 @@ if page == "📊 Dashboard":
     ax.legend()
     st.pyplot(fig)
 
-    # ======================================
-    # SHAP COMPARISON: RF vs LR
-    # ======================================
-    st.markdown("---")
-    st.subheader("🧠 SHAP Feature Importance Comparison")
-
-    # RF SHAP
-    rf_explainer = shap.Explainer(rf, X_res)
-    rf_shap = rf_explainer(X_res)
-
-    fig1 = plt.figure()
-    shap.plots.bar(rf_shap[..., 1], show=False)
-    plt.title("Random Forest - SHAP Importance")
-    st.pyplot(fig1)
-
-    # LR SHAP (linear explainer)
-    lr_explainer = shap.LinearExplainer(lr, scaler.transform(X_res))
-    lr_shap = lr_explainer(scaler.transform(X_res))
-
-    fig2 = plt.figure()
-    shap.plots.bar(lr_shap, show=False)
-    plt.title("Logistic Regression - SHAP Importance")
-    st.pyplot(fig2)
-
-    # ======================================
-    # ANOMALY HEATMAP
-    # ======================================
-    st.markdown("---")
-    st.subheader("🚨 Anomaly Heatmap (Hour × Day)")
-
-    iso = IsolationForest(contamination=0.05, random_state=42)
-    iso.fit(X_res)
-
-    df_p["Anomaly"] = iso.predict(df_p[feature_names])
-    df_anom = df_p[df_p["Anomaly"] == -1]
-
+    # Fraud Heatmap
+    st.subheader("🔥 Fraud Heatmap (Hour × Day)")
     heatmap_data = (
-        df_anom
+        df_p[df_p["TX_FRAUD"] == 1]
         .groupby(["TX_DAY", "TX_HOUR"])
         .size()
         .unstack(fill_value=0)
     )
 
+    fig2, ax2 = plt.subplots(figsize=(12, 5))
+    sns.heatmap(heatmap_data, cmap="Reds", ax=ax2)
+    st.pyplot(fig2)
+
+    # Anomaly Heatmap
+    st.subheader("🚨 Anomaly Heatmap (Hour × Day)")
+    df_p["Anomaly"] = iso.predict(df_p[features])
+    anomalies = df_p[df_p["Anomaly"] == -1]
+
+    anom_heatmap = (
+        anomalies.groupby(["TX_DAY", "TX_HOUR"])
+        .size()
+        .unstack(fill_value=0)
+    )
+
     fig3, ax3 = plt.subplots(figsize=(12, 5))
-    sns.heatmap(heatmap_data, cmap="coolwarm", ax=ax3)
-    ax3.set_xlabel("Hour of Day")
-    ax3.set_ylabel("Day of Week")
+    sns.heatmap(anom_heatmap, cmap="coolwarm", ax=ax3)
     st.pyplot(fig3)
 
 # ======================================
-# PREDICT FRAUD PAGE
+# PREDICT PAGE
 # ======================================
 elif page == "🔍 Predict Fraud":
 
-    st.title("🔍 Fraud Detection & Anomaly Mode")
+    st.title("🔍 Fraud Prediction & Anomaly Detection")
 
-    uploaded_file = st.file_uploader("📂 Upload Fraud Dataset (CSV)", type=["csv"])
-    df = pd.read_csv(uploaded_file) if uploaded_file else df_default.copy()
+    rf, lr, scaler, iso, _, _, _, _, features = train_models(df_default)
 
-    df_p = preprocess(df)
-
-    X = df_p[["TX_AMOUNT", "CUSTOMER_ID", "TERMINAL_ID", "TX_HOUR"]]
-    y = df_p["TX_FRAUD"]
-
-    smote = SMOTE(random_state=42)
-    X_res, y_res = smote.fit_resample(X, y)
-
-    rf = RandomForestClassifier(random_state=42)
-    rf.fit(X_res, y_res)
-
-    iso = IsolationForest(contamination=0.05, random_state=42)
-    iso.fit(X)
-
-    threshold = st.slider("🎚 Fraud Probability Threshold (%)", 30, 90, 50) / 100
+    threshold = st.slider("🎚 Fraud Threshold (%)", 30, 90, 50) / 100
 
     col1, col2 = st.columns(2)
     with col1:
@@ -214,19 +174,17 @@ elif page == "🔍 Predict Fraud":
 
     if st.button("🚨 Predict"):
 
-        sample = pd.DataFrame(
-            [[amount, customer, terminal, hour]],
-            columns=X.columns
-        )
+        sample = pd.DataFrame([[amount, customer, terminal, hour]], columns=features)
 
         prob = rf.predict_proba(sample)[0][1]
-        decision = "Fraud" if prob >= threshold else "Genuine"
         anomaly = iso.predict(sample)[0]
 
-        if decision == "Fraud":
+        if prob >= threshold:
             st.error(f"🚨 Fraud | Probability: {prob*100:.2f}%")
+            decision = "Fraud"
         else:
             st.success(f"✅ Genuine | Probability: {prob*100:.2f}%")
+            decision = "Genuine"
 
         if anomaly == -1:
             st.warning("⚠️ Anomalous Transaction Detected")
@@ -241,7 +199,6 @@ elif page == "🔍 Predict Fraud":
             "Anomaly": "Yes" if anomaly == -1 else "No"
         })
 
-    st.markdown("---")
     st.subheader("🕒 Prediction History")
 
     if st.session_state.history:
